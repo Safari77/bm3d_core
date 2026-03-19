@@ -1,0 +1,31 @@
+[package]
+name = "bm3d_core"
+version.workspace = true
+edition.workspace = true
+description = "Pure Rust BM3D denoising algorithm core"
+license = "MIT"
+repository = "https://github.com/ornlneutronimaging/bm3dornl"
+readme = "README.md"
+keywords = ["image-processing", "denoising", "bm3d", "noise-reduction", "scientific-computing"]
+categories = ["multimedia::images", "science"]
+authors = ["Oak Ridge National Laboratory Neutron Imaging Team"]
+
+[lib]
+name = "bm3d_core"
+crate-type = ["rlib"]
+
+[dependencies]
+ndarray = { workspace = true }
+num-traits = "0.2"
+rayon = { workspace = true }
+rustfft = { workspace = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+libc = "0.2"
+rand = "0.8"
+rand_distr = "0.4"
+
+[[bench]]
+name = "bm3d_benchmarks"
+harness = false
