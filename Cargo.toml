@@ -1,10 +1,11 @@
 [package]
 name = "bm3d_core"
-version.workspace = true
-edition.workspace = true
+version = "0.9.0"
+edition = "2021"
 description = "Pure Rust BM3D denoising algorithm core"
 license = "MIT"
-repository = "https://github.com/ornlneutronimaging/bm3dornl"
+repository = "https://github.com/Safari77/bm3d_core"
+# Original: "https://github.com/ornlneutronimaging/bm3dornl"
 readme = "README.md"
 keywords = ["image-processing", "denoising", "bm3d", "noise-reduction", "scientific-computing"]
 categories = ["multimedia::images", "science"]
@@ -15,10 +16,10 @@ name = "bm3d_core"
 crate-type = ["rlib"]
 
 [dependencies]
-ndarray = { workspace = true }
+ndarray = "0.15"
 num-traits = "0.2"
-rayon = { workspace = true }
-rustfft = { workspace = true }
+rayon = "1.8"
+rustfft = "6.2"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
