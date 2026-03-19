@@ -135,6 +135,8 @@ pub struct Bm3dConfig<F: Bm3dFloat> {
     /// Optional per-call override for 8x8 Hadamard fast path.
     /// `Some(true/false)` takes precedence over env/global defaults.
     pub use_hadamard_fast_path: Option<bool>,
+    /// Apply Anscombe transform for Poisson noise stabilization.
+    pub anscombe: bool,
 }
 
 impl<F: Bm3dFloat> Default for Bm3dConfig<F> {
@@ -155,6 +157,7 @@ impl<F: Bm3dFloat> Default for Bm3dConfig<F> {
             fft_alpha: F::from_f64_c(DEFAULT_FFT_ALPHA),
             notch_width: F::from_f64_c(DEFAULT_NOTCH_WIDTH),
             use_hadamard_fast_path: None,
+            anscombe: false,
         }
     }
 }
@@ -355,12 +358,27 @@ pub fn bm3d_ring_artifact_removal_with_plans<F: Bm3dFloat>(
     }
 
     let (d_min, _d_max, range, eps, mut z_norm) = timed!(profile_timing, normalize_ns, {
-        // Step 1: Compute global min/max for normalization
-        let d_min = sinogram
+        // Step 1a: Apply Anscombe transform ONLY if enabled.
+        let anscombe_temp = if config.anscombe {
+            let three_eighths = F::from_f64_c(0.375);
+            let two = F::from_f64_c(2.0);
+            Some(sinogram.mapv(|x| {
+                let safe_x = if x < F::zero() { F::zero() } else { x };
+                two * (safe_x + three_eighths).sqrt()
+            }))
+        } else {
+            None
+        };
+
+        // Create a unified view pointing to either the transformed array or the original input
+        let working_view = anscombe_temp.as_ref().map(|a| a.view()).unwrap_or(sinogram);
+
+        // Step 1b: Compute global min/max for normalization using `working_view`
+        let d_min = working_view
             .iter()
             .copied()
             .fold(F::infinity(), |a, b| if b < a { b } else { a });
-        let d_max = sinogram
+        let d_max = working_view
             .iter()
             .copied()
             .fold(F::neg_infinity(), |a, b| if b > a { b } else { a });
@@ -368,9 +386,9 @@ pub fn bm3d_ring_artifact_removal_with_plans<F: Bm3dFloat>(
         let range = d_max - d_min;
         let eps = F::from_f64_c(NORMALIZATION_EPSILON);
 
-        // Step 2: Normalize to [0, 1]
+        // Step 2: Normalize to [0, 1] using `working_view`
         let z_norm = if range > eps {
-            sinogram.mapv(|x| (x - d_min) / range)
+            working_view.mapv(|x| (x - d_min) / range)
         } else {
             // Constant image - just use zeros
             Array2::zeros((rows, cols))
@@ -480,11 +498,24 @@ pub fn bm3d_ring_artifact_removal_with_plans<F: Bm3dFloat>(
 
     // Step 8: Denormalize to original range
     let output = timed!(profile_timing, denormalize_ns, {
-        if range > eps {
+        // First, revert the Min-Max linear normalization
+        let denorm = if range > eps {
             yhat_final.mapv(|x| x * range + d_min)
         } else {
             // Constant image - restore original mean/min
             Array2::from_elem(yhat_final.raw_dim(), d_min)
+        };
+
+        // Second, apply the inverse Anscombe transform if it was enabled
+        if config.anscombe {
+            let three_eighths = F::from_f64_c(0.375);
+            let two = F::from_f64_c(2.0);
+            denorm.mapv(|x| {
+                let half_x = x / two;
+                (half_x * half_x) - three_eighths
+            })
+        } else {
+            denorm
         }
     });
 
