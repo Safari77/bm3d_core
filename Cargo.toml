@@ -16,10 +16,10 @@ name = "bm3d_core"
 crate-type = ["rlib"]
 
 [dependencies]
-ndarray = "0.15"
+ndarray = "0.17"
 num-traits = "0.2"
-rayon = "1.8"
-rustfft = "6.2"
+rayon = "1.11"
+rustfft = "6.4"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
