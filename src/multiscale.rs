@@ -14,11 +14,11 @@
 //! This enables handling of wide streaks that single-scale BM3D cannot capture.
 
 use crate::utils::compute_1d_median_filter;
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
+use ndarray::{s, Array1, Array2, ArrayView1, ArrayView2};
 
 use crate::float_trait::Bm3dFloat;
 use crate::orchestration::{
-    Bm3dConfig, RingRemovalMode, bm3d_ring_artifact_removal, bm3d_ring_artifact_removal_with_plans,
+    bm3d_ring_artifact_removal, bm3d_ring_artifact_removal_with_plans, Bm3dConfig, RingRemovalMode,
 };
 
 // =============================================================================
@@ -469,7 +469,7 @@ pub fn generate_psd_shapes<F: Bm3dFloat>(denoise_sizes: &[usize]) -> Vec<Array1<
 
 /// Compute |FFT(kernel)|² padded/truncated to target size.
 fn compute_fft_psd<F: Bm3dFloat>(kernel: &[f64], target_size: usize) -> Array1<F> {
-    use rustfft::{FftPlanner, num_complex::Complex};
+    use rustfft::{num_complex::Complex, FftPlanner};
 
     // Pad or truncate kernel to target size
     let mut padded = vec![Complex::new(0.0, 0.0); target_size];

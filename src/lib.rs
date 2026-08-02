@@ -10,6 +10,7 @@
 //! the precision that best fits their needs.
 
 pub mod block_matching;
+pub mod deblur;
 pub mod filtering;
 pub mod float_trait;
 pub mod fourier_svd;
@@ -23,15 +24,21 @@ pub mod utils;
 
 // Re-export commonly used types at the crate root
 pub use block_matching::PatchMatch;
+pub use deblur::{
+    blur_with_psf, bm3d_deblur, bm3d_deblur_detailed, bm3d_deblur_stack, boxcar_psf,
+    estimate_white_noise_sigma, gaussian_psf, horizontal_gaussian_psf, normalize_psf,
+    Bm3dDeblurConfig, Bm3dDeblurResult, DeblurBoundary,
+};
 pub use float_trait::Bm3dFloat;
 pub use multiscale::{
-    MultiscaleConfig, multiscale_bm3d_streak_removal, multiscale_bm3d_streak_removal_with_plans,
+    multiscale_bm3d_streak_removal, multiscale_bm3d_streak_removal_with_plans, MultiscaleConfig,
 };
 pub use noise_estimation::estimate_noise_sigma;
-pub use orchestration::{Bm3dConfig, RingRemovalMode, bm3d_ring_artifact_removal};
+pub use orchestration::{bm3d_ring_artifact_removal, Bm3dConfig, RingRemovalMode};
 pub use pipeline::{
-    Bm3dKernelConfig, Bm3dMode, Bm3dPlans, run_bm3d_kernel, run_bm3d_step, run_bm3d_step_stack,
-    set_use_hadamard_fast_path, use_hadamard_fast_path,
+    run_bm3d_kernel, run_bm3d_kernel_colored_noise, run_bm3d_step, run_bm3d_step_colored_noise,
+    run_bm3d_step_stack, run_bm3d_step_stack_colored_noise, set_use_hadamard_fast_path,
+    use_hadamard_fast_path, Bm3dKernelConfig, Bm3dMode, Bm3dPlans,
 };
 pub use streak::estimate_streak_profile_impl;
 pub use transforms::{fft2d, ifft2d, wht2d_8x8_forward, wht2d_8x8_inverse};

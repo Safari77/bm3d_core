@@ -1,11 +1,11 @@
 //! BM3D Pipeline - Core denoising kernel and multi-image processing.
 
-use ndarray::{Array2, Array3, ArrayView2, ArrayView3, Axis, s};
+use ndarray::{s, Array2, Array3, ArrayView2, ArrayView3, Axis};
 use rayon::prelude::*;
-use rustfft::Fft;
 use rustfft::num_complex::Complex;
-use std::sync::Arc;
+use rustfft::Fft;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::block_matching::{self, PatchMatch};
@@ -1385,6 +1385,48 @@ pub fn run_bm3d_kernel<F: Bm3dFloat>(
         mode,
         sigma_psd,
         sigma_map,
+        None,
+        config,
+        plans,
+        &mut scratch_pool,
+    )
+}
+
+/// Core BM3D Single Image Kernel with an optional stationary colored-noise model.
+///
+/// This is the BM3D-DEB (deblurring) extension entry point. `coeff_sigma`, when
+/// `Some` and shaped `(patch_size, patch_size)`, gives the per-2D-transform-coefficient
+/// equivalent white-noise standard deviation of noise that is *independent between
+/// patches*, so its variance grows linearly with the group size `k`:
+///
+/// `var[r, c] = k * patch_size^2 * coeff_sigma[r, c]^2`
+///
+/// This differs from `sigma_psd`, which models streak noise that is *coherent across
+/// a group* (variance grows with `k^2`). Both models can be active at the same time;
+/// their variances add.
+///
+/// Note: `coeff_sigma` is expressed in the 2D DFT basis, so the 8x8 Hadamard fast path
+/// should be disabled (`use_hadamard_fast_path: Some(false)`) when a non-flat
+/// `coeff_sigma` is supplied.
+#[allow(clippy::too_many_arguments)]
+pub fn run_bm3d_kernel_colored_noise<F: Bm3dFloat>(
+    input_noisy: ArrayView2<F>,
+    input_pilot: ArrayView2<F>,
+    mode: Bm3dMode,
+    sigma_psd: ArrayView2<F>,
+    sigma_map: ArrayView2<F>,
+    coeff_sigma: Option<ArrayView2<F>>,
+    config: &Bm3dKernelConfig<F>,
+    plans: &Bm3dPlans<F>,
+) -> Array2<F> {
+    let mut scratch_pool = KernelScratchPool::<F>::new();
+    run_bm3d_kernel_with_scratch(
+        input_noisy,
+        input_pilot,
+        mode,
+        sigma_psd,
+        sigma_map,
+        coeff_sigma,
         config,
         plans,
         &mut scratch_pool,
@@ -1397,6 +1439,7 @@ fn run_bm3d_kernel_with_scratch<F: Bm3dFloat>(
     mode: Bm3dMode,
     sigma_psd: ArrayView2<F>,
     sigma_map: ArrayView2<F>,
+    coeff_sigma: Option<ArrayView2<F>>,
     config: &Bm3dKernelConfig<F>,
     plans: &Bm3dPlans<F>,
     scratch_pool: &mut KernelScratchPool<F>,
@@ -1410,6 +1453,11 @@ fn run_bm3d_kernel_with_scratch<F: Bm3dFloat>(
     let use_sigma_map_full = sigma_map.dim() == (rows, cols);
     let use_sigma_map_row = sigma_map.dim() == (1, cols);
     let use_colored_noise = sigma_psd.dim() == (patch_size, patch_size);
+    // BM3D-DEB extension: optional per-coefficient white-equivalent sigma for
+    // stationary colored noise (independent between patches -> variance scales with k).
+    let coeff_sigma = coeff_sigma.filter(|cs| cs.dim() == (patch_size, patch_size));
+    // Either noise model forces the per-coefficient (map based) filtering path.
+    let use_coeff_noise_map = use_colored_noise || coeff_sigma.is_some();
     let scalar_sigma_sq = config.sigma_random * config.sigma_random;
 
     // Fast path for 8x8 patches using Hadamard (opt-in via env).
@@ -1645,18 +1693,29 @@ fn run_bm3d_kernel_with_scratch<F: Bm3dFloat>(
                             Bm3dMode::HardThreshold => {
                                 let mut nz_count = 0usize;
                                 let patch_area = patch_size * patch_size;
-                                if use_colored_noise {
+                                if use_coeff_noise_map {
                                     // Hard threshold map varies per coefficient when colored
                                     // noise PSD is enabled.
                                     let hard_thresholds_sq = &mut worker.coeff_buffer;
                                     for r in 0..patch_size {
                                         for c in 0..patch_size {
                                             hard_thresholds_sq[r * patch_size + c] = {
-                                                let sigma_s_dist = sigma_psd[[r, c]];
+                                                let sigma_s_dist = if use_colored_noise {
+                                                    sigma_psd[[r, c]]
+                                                } else {
+                                                    F::zero()
+                                                };
                                                 let effective_sigma_s =
                                                     sigma_s_dist * local_sigma_streak;
+                                                // BM3D-DEB: stationary colored noise adds an
+                                                // independent (k-scaling) variance term.
+                                                let sigma_c = match coeff_sigma {
+                                                    Some(cs) => cs[[r, c]],
+                                                    None => F::zero(),
+                                                };
                                                 let k_f = F::usize_as(k);
-                                                let var_r = k_f * scalar_sigma_sq;
+                                                let var_r =
+                                                    k_f * (scalar_sigma_sq + sigma_c * sigma_c);
                                                 let var_s = (k_f * k_f)
                                                     * effective_sigma_s
                                                     * effective_sigma_s;
@@ -1739,17 +1798,27 @@ fn run_bm3d_kernel_with_scratch<F: Bm3dFloat>(
                             Bm3dMode::Wiener => {
                                 let mut wiener_sum = F::zero();
                                 let patch_area = patch_size * patch_size;
-                                if use_colored_noise {
+                                if use_coeff_noise_map {
                                     // Wiener noise variance map varies per coefficient when
                                     // colored noise PSD is enabled.
                                     let noise_vars = &mut worker.coeff_buffer;
                                     for r in 0..patch_size {
                                         for c in 0..patch_size {
-                                            let sigma_s_dist = sigma_psd[[r, c]];
+                                            let sigma_s_dist = if use_colored_noise {
+                                                sigma_psd[[r, c]]
+                                            } else {
+                                                F::zero()
+                                            };
                                             let effective_sigma_s =
                                                 sigma_s_dist * local_sigma_streak;
+                                            // BM3D-DEB: stationary colored noise adds an
+                                            // independent (k-scaling) variance term.
+                                            let sigma_c = match coeff_sigma {
+                                                Some(cs) => cs[[r, c]],
+                                                None => F::zero(),
+                                            };
                                             let k_f = F::usize_as(k);
-                                            let var_r = k_f * scalar_sigma_sq;
+                                            let var_r = k_f * (scalar_sigma_sq + sigma_c * sigma_c);
                                             let var_s =
                                                 (k_f * k_f) * effective_sigma_s * effective_sigma_s;
                                             noise_vars[r * patch_size + c] =
@@ -2001,6 +2070,43 @@ pub fn run_bm3d_step<F: Bm3dFloat>(
     config: &Bm3dKernelConfig<F>,
     plans: &Bm3dPlans<F>,
 ) -> Result<Array2<F>, String> {
+    run_bm3d_step_colored_noise(
+        input_noisy,
+        input_pilot,
+        mode,
+        sigma_psd,
+        sigma_map,
+        None,
+        config,
+        plans,
+    )
+}
+
+/// Run BM3D step on a single 2D image with an optional stationary colored-noise model.
+///
+/// See [`run_bm3d_kernel_colored_noise`] for the meaning of `coeff_sigma`.
+/// Passing `None` is exactly equivalent to [`run_bm3d_step`].
+#[allow(clippy::too_many_arguments)]
+pub fn run_bm3d_step_colored_noise<F: Bm3dFloat>(
+    input_noisy: ArrayView2<F>,
+    input_pilot: ArrayView2<F>,
+    mode: Bm3dMode,
+    sigma_psd: ArrayView2<F>,
+    sigma_map: ArrayView2<F>,
+    coeff_sigma: Option<ArrayView2<F>>,
+    config: &Bm3dKernelConfig<F>,
+    plans: &Bm3dPlans<F>,
+) -> Result<Array2<F>, String> {
+    if let Some(cs) = coeff_sigma.as_ref() {
+        if cs.dim() != (config.patch_size, config.patch_size) {
+            return Err(format!(
+                "Coefficient sigma dimension mismatch: expected ({}, {}), got {:?}",
+                config.patch_size,
+                config.patch_size,
+                cs.dim()
+            ));
+        }
+    }
     if input_pilot.dim() != input_noisy.dim() {
         return Err(format!(
             "Dimension mismatch: input_noisy has shape {:?}, but input_pilot has shape {:?}",
@@ -2020,12 +2126,13 @@ pub fn run_bm3d_step<F: Bm3dFloat>(
         ));
     }
 
-    Ok(run_bm3d_kernel(
+    Ok(run_bm3d_kernel_colored_noise(
         input_noisy,
         input_pilot,
         mode,
         sigma_psd,
         sigma_map,
+        coeff_sigma,
         config,
         plans,
     ))
@@ -2046,7 +2153,47 @@ pub fn run_bm3d_step_stack<F: Bm3dFloat>(
     plans: &Bm3dPlans<F>,
     progress_fn: Option<&dyn Fn(usize, usize) -> Result<(), String>>,
 ) -> Result<Array3<F>, String> {
+    run_bm3d_step_stack_colored_noise(
+        input_noisy,
+        input_pilot,
+        mode,
+        sigma_psd,
+        sigma_map,
+        None,
+        config,
+        plans,
+        progress_fn,
+    )
+}
+
+/// Run BM3D step on a 3D stack of images with an optional stationary colored-noise model.
+///
+/// See [`run_bm3d_kernel_colored_noise`] for the meaning of `coeff_sigma`. The same
+/// `coeff_sigma` is applied to every slice; passing `None` is exactly equivalent to
+/// [`run_bm3d_step_stack`].
+#[allow(clippy::too_many_arguments)]
+pub fn run_bm3d_step_stack_colored_noise<F: Bm3dFloat>(
+    input_noisy: ArrayView3<F>,
+    input_pilot: ArrayView3<F>,
+    mode: Bm3dMode,
+    sigma_psd: ArrayView2<F>,
+    sigma_map: ArrayView3<F>,
+    coeff_sigma: Option<ArrayView2<F>>,
+    config: &Bm3dKernelConfig<F>,
+    plans: &Bm3dPlans<F>,
+    progress_fn: Option<&dyn Fn(usize, usize) -> Result<(), String>>,
+) -> Result<Array3<F>, String> {
     let (n, rows, cols) = input_noisy.dim();
+    if let Some(cs) = coeff_sigma.as_ref() {
+        if cs.dim() != (config.patch_size, config.patch_size) {
+            return Err(format!(
+                "Coefficient sigma dimension mismatch: expected ({}, {}), got {:?}",
+                config.patch_size,
+                config.patch_size,
+                cs.dim()
+            ));
+        }
+    }
     if input_pilot.dim() != (n, rows, cols) {
         return Err(format!(
             "Stack dimension mismatch: input_noisy has shape {:?}, but input_pilot has shape {:?}",
@@ -2086,6 +2233,7 @@ pub fn run_bm3d_step_stack<F: Bm3dFloat>(
             mode,
             sigma_psd,
             map_slice,
+            coeff_sigma,
             config,
             plans,
             &mut scratch_pool,
