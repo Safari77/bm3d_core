@@ -1,7 +1,7 @@
 [package]
 name = "bm3d_core"
-version = "0.9.0"
-edition = "2021"
+version = "0.11.0"
+edition = "2024"
 description = "Pure Rust BM3D denoising algorithm core"
 license = "MIT"
 repository = "https://github.com/Safari77/bm3d_core"
